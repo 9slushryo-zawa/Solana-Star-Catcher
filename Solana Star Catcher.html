@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Solana Star Catcher</title>
+<style>
+  :root {
+    --purple: #9945FF;
+    --green: #14F195;
+    --bg: #120a24;
+    --bg2: #1d0f3d;
+    --text: #f4efff;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font-family: "Hiragino Sans", "Yu Gothic", "Noto Sans JP", system-ui, sans-serif;
+    touch-action: manipulation; user-select: none; -webkit-user-select: none;
+  }
+  #app { display: flex; flex-direction: column; height: 100%; max-width: 900px; margin: 0 auto; }
+  header { padding: 14px 16px 10px; text-align: center; }
+  h1 {
+    margin: 0 0 10px; font-size: clamp(22px, 6vw, 36px); letter-spacing: .02em;
+    background: linear-gradient(90deg, var(--purple), var(--green));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hud { display: flex; justify-content: center; gap: 12px; }
+  .box {
+    flex: 1; max-width: 200px; padding: 6px 10px; border-radius: 12px;
+    background: rgba(153,69,255,.15); border: 1px solid rgba(153,69,255,.5);
+  }
+  .box small { display: block; font-size: 12px; opacity: .75; }
+  .box b { font-size: clamp(22px, 6vw, 30px); font-variant-numeric: tabular-nums; color: var(--green); }
+  .box.low b { color: #ff6b8b; }
+  #stage {
+    position: relative; flex: 1; margin: 0 10px 12px; border-radius: 16px; overflow: hidden;
+    background: radial-gradient(ellipse at 50% 0%, var(--bg2), var(--bg) 75%);
+    border: 1px solid rgba(20,241,149,.35);
+  }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; padding: 20px; text-align: center;
+    background: rgba(18,10,36,.82);
+  }
+  .overlay.hidden { display: none; }
+  .overlay p { margin: 0; line-height: 1.6; }
+  .big { font-size: clamp(44px, 14vw, 72px); font-weight: 800; color: var(--green); line-height: 1; }
+  button {
+    font: inherit; font-weight: 700; font-size: 18px; padding: 14px 36px; border: 0; border-radius: 999px;
+    color: #12061f; background: linear-gradient(90deg, var(--purple), var(--green)); cursor: pointer;
+  }
+  button:active { transform: scale(.97); }
+  button:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
+  @media (prefers-reduced-motion: reduce) { button:active { transform: none; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Solana Star Catcher</h1>
+    <div class="hud">
+      <div class="box"><small>スコア</small><b id="score">0</b></div>
+      <div class="box" id="timeBox"><small>残り時間</small><b id="time">30</b></div>
+    </div>
+  </header>
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div class="overlay" id="startScreen">
+      <p>落ちてくる星をタップして集めよう。<br>制限時間は30秒。</p>
+      <p><span style="color:var(--green)">緑の星 +1</span>　<span style="color:var(--purple)">紫の星 +3（小さくて速い）</span></p>
+      <button id="startBtn">スタート</button>
+    </div>
+    <div class="overlay hidden" id="endScreen">
+      <p>タイムアップ！</p>
+      <div class="big" id="finalScore">0</div>
+      <p id="bestText"></p>
+      <button id="retryBtn">もう一度</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const PURPLE = '#9945FF', GREEN = '#14F195', DURATION = 30;
+  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+  const $ = id => document.getElementById(id);
+  const scoreEl = $('score'), timeEl = $('time'), timeBox = $('timeBox');
+  const startScreen = $('startScreen'), endScreen = $('endScreen');
+
+  let W = 0, H = 0, dpr = 1;
+  let stars = [], bursts = [], popups = [];
+  let score = 0, timeLeft = DURATION, running = false;
+  let startedAt = 0, lastFrame = 0, spawnTimer = 0;
+  let best = 0;
+  try { best = +localStorage.getItem('ssc-best') || 0; } catch (e) {}
+
+  function resize() {
+    const r = cv.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    cv.width = W * dpr; cv.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+
+  function spawn() {
+    const bonus = Math.random() < 0.2;
+    const base = Math.min(W, 520);
+    const size = bonus ? base * 0.045 + 10 : base * 0.07 + 12;
+    const progress = (performance.now() - startedAt) / (DURATION * 1000);
+    const speed = (bonus ? 1.5 : 1) * (H / 4.2) * (1 + progress * 0.8) * (0.8 + Math.random() * 0.5);
+    stars.push({
+      x: size + Math.random() * (W - size * 2), y: -size,
+      r: size, vy: speed, rot: Math.random() * Math.PI,
+      vr: (Math.random() - 0.5) * 2.5, bonus
+    });
+  }
+
+  function starPath(x, y, r, rot) {
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const a = rot + i * Math.PI / 5 - Math.PI / 2;
+      const rr = i % 2 ? r * 0.45 : r;
+      ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+    }
+    ctx.closePath();
+  }
+
+  function drawStar(s) {
+    const c = s.bonus ? PURPLE : GREEN;
+    ctx.save();
+    ctx.shadowColor = c; ctx.shadowBlur = 16;
+    starPath(s.x, s.y, s.r, s.rot);
+    ctx.fillStyle = c; ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = 2; ctx.strokeStyle = s.bonus ? GREEN : PURPLE; ctx.stroke();
+    ctx.restore();
+  }
+
+  function hit(px, py) {
+    if (!running) return;
+    for (let i = stars.length - 1; i >= 0; i--) {
+      const s = stars[i];
+      const reach = s.r + 10; // 指でも当てやすいように判定を少し広げる
+      if ((px - s.x) ** 2 + (py - s.y) ** 2 <= reach * reach) {
+        const pts = s.bonus ? 3 : 1;
+        score += pts; scoreEl.textContent = score;
+        popups.push({ x: s.x, y: s.y, t: 0, text: '+' + pts, c: s.bonus ? PURPLE : GREEN });
+        for (let k = 0; k < 10; k++) {
+          const a = Math.random() * Math.PI * 2, v = 80 + Math.random() * 160;
+          bursts.push({ x: s.x, y: s.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, t: 0, c: s.bonus ? PURPLE : GREEN });
+        }
+        stars.splice(i, 1);
+        return;
+      }
+    }
+  }
+
+  cv.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    const r = cv.getBoundingClientRect();
+    hit(e.clientX - r.left, e.clientY - r.top);
+  });
+
+  function frame(now) {
+    const dt = Math.min((now - lastFrame) / 1000, 0.05);
+    lastFrame = now;
+    ctx.clearRect(0, 0, W, H);
+
+    if (running) {
+      timeLeft = Math.max(0, DURATION - (now - startedAt) / 1000);
+      timeEl.textContent = Math.ceil(timeLeft);
+      timeBox.classList.toggle('low', timeLeft <= 5);
+      spawnTimer -= dt;
+      if (spawnTimer <= 0) {
+        spawn();
+        const progress = 1 - timeLeft / DURATION;
+        spawnTimer = (0.65 - progress * 0.3) * (0.7 + Math.random() * 0.6);
+      }
+      if (timeLeft <= 0) endGame();
+    }
+
+    for (let i = stars.length - 1; i >= 0; i--) {
+      const s = stars[i];
+      s.y += s.vy * dt; s.rot += s.vr * dt;
+      if (s.y - s.r > H) stars.splice(i, 1); else drawStar(s);
+    }
+    for (let i = bursts.length - 1; i >= 0; i--) {
+      const b = bursts[i]; b.t += dt;
+      if (b.t > 0.5) { bursts.splice(i, 1); continue; }
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      ctx.globalAlpha = 1 - b.t / 0.5; ctx.fillStyle = b.c;
+      ctx.fillRect(b.x - 2, b.y - 2, 4, 4);
+    }
+    ctx.globalAlpha = 1;
+    ctx.font = '800 22px system-ui, sans-serif'; ctx.textAlign = 'center';
+    for (let i = popups.length - 1; i >= 0; i--) {
+      const p = popups[i]; p.t += dt;
+      if (p.t > 0.6) { popups.splice(i, 1); continue; }
+      ctx.globalAlpha = 1 - p.t / 0.6; ctx.fillStyle = p.c;
+      ctx.fillText(p.text, p.x, p.y - 14 - p.t * 50);
+    }
+    ctx.globalAlpha = 1;
+    requestAnimationFrame(frame);
+  }
+
+  function startGame() {
+    stars = []; bursts = []; popups = [];
+    score = 0; timeLeft = DURATION; spawnTimer = 0;
+    scoreEl.textContent = 0; timeEl.textContent = DURATION;
+    timeBox.classList.remove('low');
+    startScreen.classList.add('hidden'); endScreen.classList.add('hidden');
+    startedAt = performance.now(); running = true;
+  }
+
+  function endGame() {
+    running = false; timeEl.textContent = 0;
+    stars = [];
+    const isBest = score > best;
+    if (isBest) { best = score; try { localStorage.setItem('ssc-best', best); } catch (e) {} }
+    $('finalScore').textContent = score;
+    $('bestText').textContent = isBest ? '自己ベスト更新！' : 'ベスト: ' + best;
+    endScreen.classList.remove('hidden');
+  }
+
+  $('startBtn').addEventListener('click', startGame);
+  $('retryBtn').addEventListener('click', startGame);
+
+  resize();
+  lastFrame = performance.now();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
